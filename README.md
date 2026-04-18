@@ -1,0 +1,2 @@
+- 激活虚拟环境：source .venv/bin/activate
+- 退出虚拟环境：deactivate

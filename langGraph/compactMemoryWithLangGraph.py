@@ -100,8 +100,56 @@ graph_builder.add_conditional_edges("chatbot", should_summarize)
 # 要約完了後、今回のグラフ実行を終了する
 graph_builder.add_edge("summarize", END)
 
-# グラフ内で「メッセージ削除」操作を行うため、LangGraph はメモリチェックポイント（Checkpointer）の
-# 有効化を要求する。ここでは最もシンプルなインメモリチェックポイント方式を使用する
+# ============================================================
+# MemorySaver（チェックポイント機構）について
+#
+# ■ MemorySaver とは何か？
+#   LangGraph が提供するインメモリのチェックポイント機構。
+#   グラフの実行中に State のスナップショットを自動保存し、
+#   次回の実行時に前回の状態を自動復元する。
+#
+# ■ 保存タイミング（暗黙的・自動的に行われる）
+#   各「ノード」の実行完了後に、更新された State が自動保存される。
+#   ルーティング関数（条件エッジ）はノードではないため、保存は発生しない。
+#
+#   本プログラムでの具体的な保存タイミング：
+#
+#     START
+#       │
+#       ▼
+#     chatbot ノード実行完了 → 💾 チェックポイント保存 #1
+#       │                     （messages に AI の回答が追加された状態）
+#       ▼
+#     should_summarize（ルーティング関数 → 保存なし）
+#       │
+#       ├── summarize 分岐：
+#       │   summarize ノード実行完了 → 💾 チェックポイント保存 #2
+#       │   │                         （summary 更新済み、古いメッセージ削除済み）
+#       │   ▼
+#       │  END
+#       │
+#       └── END 分岐：
+#          END → 終了
+#
+# ■ LangChain との違い（明示的 vs 暗黙的な保存）
+#   LangChain では、会話履歴の保存・復元を開発者が手動で行う必要があった：
+#     chat_history_db.add_user_message(query)      # 手動で保存
+#     chat_history_db.add_ai_message(response)     # 手動で保存
+#     current_messages = chat_history_db.messages   # 手動で復元
+#
+#   LangGraph + MemorySaver では、この保存・復元がフレームワークによって
+#   暗黙的に自動実行される。開発者は保存/復元のコードを一切書く必要がない。
+#   thread_id を指定するだけで、セッションごとの状態管理が自動的に行われる。
+#
+# ■ 本番環境での注意点
+#   MemorySaver はプロセスのメモリ上にデータを保持するため：
+#   - プロセスが終了すると全データが消失する
+#   - 複数インスタンス間でデータを共有できない
+#   開発・テスト用途には十分だが、本番環境では永続化対応の
+#   チェックポイントに置き換える必要がある：
+#   - SqliteSaver   → 単一サーバー向け（組み込みDB）
+#   - PostgresSaver → マルチインスタンス向け（本番推奨）
+# ============================================================
 from langgraph.checkpoint.memory import MemorySaver
 memory = MemorySaver()
 app = graph_builder.compile(checkpointer=memory)

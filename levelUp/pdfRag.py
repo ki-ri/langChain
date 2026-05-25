@@ -141,15 +141,63 @@ if prompt := st.chat_input("您可以问我天气，或者问关于已上传 PDF
     # 2. 先把当前用户的提问追加到记忆库中
     st.session_state.messages.append(HumanMessage(content=prompt))
     
-    # 3. 呼叫 Agent 思考
+    # 3. 呼叫 Agent 思考并进行流式输出
     with st.chat_message("assistant"):
-        with st.spinner("思考中..."):
-            # 将包含新问题的完整历史发送给 LangGraph
-            response = agent_app.invoke({"messages": st.session_state.messages})
+        # 建立一个空的占位符，用来存放逐渐变长的文字
+        message_placeholder = st.empty()
+        full_response = ""
+        
+        # 核心黑科技：多路复用 stream_mode
+        # "messages" 负责提供打字机字符，"values" 负责提供完整的后台图状态
+        events = agent_app.stream(
+            {"messages": st.session_state.messages}, 
+            stream_mode=["messages", "values"]
+        )
+        
+        final_state = None
+        
+        for event_type, data in events:
+            if event_type == "messages":
+                # 解析消息块
+                chunk, metadata = data
+                
+                # 过滤条件：只截获 chatbot 节点产生的内容，且内容必须是文本字符串
+                # 这样就能完美过滤掉 Agent 思考调用工具时的内部指令
+                if metadata.get("langgraph_node") == "chatbot" and chunk.content:
+                    if isinstance(chunk.content, str):
+                        full_response += chunk.content
+                        # 加上光标 ▌，让打字效果更逼真
+                        message_placeholder.markdown(full_response + "▌")
             
-            # 4. 更新全局记忆（LangGraph 会把新产生的 AiMessage 和 ToolMessage 追加进去）
-            st.session_state.messages = response["messages"]
+            elif event_type == "values":
+                # 每次图的状态发生整体更新时，默默存盘
+                final_state = data
+        
+        # 循环结束后，移除光标，显示最终的完美回答
+        message_placeholder.markdown(full_response)
+        
+        # 4. 更新全局记忆
+        # 将图产生的完整新状态（包含了你看不到的 ToolMessage 和 Tool Call）同步回网页
+        if final_state is not None:
+            st.session_state.messages = final_state["messages"]
+
+# # --- 8. 处理用户输入与 Agent 运行（无打字机效果） ---
+# if prompt := st.chat_input("您可以问我天气，或者问关于已上传 PDF 的任何问题！"):
+#     # 1. 在 UI 上展现用户输入
+#     st.chat_message("user").write(prompt)
+    
+#     # 2. 先把当前用户的提问追加到记忆库中
+#     st.session_state.messages.append(HumanMessage(content=prompt))
+    
+#     # 3. 呼叫 Agent 思考
+#     with st.chat_message("assistant"):
+#         with st.spinner("思考中..."):
+#             # 将包含新问题的完整历史发送给 LangGraph
+#             response = agent_app.invoke({"messages": st.session_state.messages})
             
-            # 5. 取出最后一条消息（即 Agent 总结出的最终拟人回答）渲染到网页上
-            final_ai_msg = response["messages"][-1]
-            st.write(final_ai_msg.content)
+#             # 4. 更新全局记忆（LangGraph 会把新产生的 AiMessage 和 ToolMessage 追加进去）
+#             st.session_state.messages = response["messages"]
+            
+#             # 5. 取出最后一条消息（即 Agent 总结出的最终拟人回答）渲染到网页上
+#             final_ai_msg = response["messages"][-1]
+#             st.write(final_ai_msg.content)

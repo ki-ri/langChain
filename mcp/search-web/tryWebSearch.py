@@ -14,28 +14,35 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from typing import Annotated, TypedDict
+from langchain_core.messages import SystemMessage
 
-# 导入 2026 标准后台调度器
+# 导入后台调度器
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# --- 1. 页面与全局调度器初始化 ---
+# --- 1. 初始化配置与页面 ---
 load_dotenv()
 st.set_page_config(page_title="自主自动化 Agent", page_icon="⏰", layout="wide")
 st.title("🤖 终极进化：具备‘联网冲浪’与‘自我觉醒定时’的 Autonomous Agent")
 
 allowed_dir = os.path.abspath(".")
 
-# 在 Streamlit 全局状态中锁死一个后台调度器，防止重复启动
-if "scheduler" not in st.session_state:
-    st.session_state.scheduler = BackgroundScheduler()
-    st.session_state.scheduler.start()
+# 🌟 核心修复：使用 Streamlit 官方推荐的资源缓存器
+# 这样可以确保：1. 调度器跨线程安全访问；2. 网页刷新时不会重复创建多个调度器进程
+@st.cache_resource
+def init_global_scheduler():
+    sc = BackgroundScheduler()
+    sc.start()
+    return sc
+
+# 生成全局唯一的、任何线程都能访问的调度器实例
+GLOBAL_SCHEDULER = init_global_scheduler()
 
 with st.sidebar:
     st.header("🌐 赛博工厂集群控制台")
     st.success("🟢 节点 1: Filesystem (Node.js)")
     st.success("🟢 节点 2: SQLite Database (Python)")
     st.success("🟢 节点 3: Internet Search (Python)")
-    st.info("⏰ 后台守护进程: APScheduler 已就绪")
+    st.info("⏰ 后台守护进程: 全局 APScheduler 已在主进程级就绪")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -59,13 +66,16 @@ mcp_config = {
     }
 }
 
-# --- 3. 编写核心图编译函数（因为后台线程和前台线程都需要调用它） ---
+# --- 3. 编写核心图编译函数 ---
+system_message = SystemMessage(content="""
+あなたはファイルに何かを書き込む前に、
+必ず get_current_datetime ツールを呼び出して現在時刻を取得すること。
+絶対に自分の知識から日時を推測してはいけない。
+""")
 async def compile_agent_app():
     client = MultiServerMCPClient(mcp_config)
     mcp_tools = await client.get_tools()
-    
-    # 🌟 核心艺术：让大模型既有 MCP 的三大外部武器，又有我们塞给它的“时间魔法”本地工具！
-    all_tools = list(mcp_tools) + [register_background_alarm_task]
+    all_tools = list(mcp_tools) + [register_background_alarm_task] + [get_current_datetime]
     
     llm = ChatOpenAI(
         model="deepseek-chat",
@@ -78,6 +88,7 @@ async def compile_agent_app():
         messages: Annotated[list, add_messages]
         
     async def chatbot(state: State):
+
         return {"messages": [await llm.ainvoke(state["messages"])]}
         
     workflow = StateGraph(State)
@@ -88,42 +99,43 @@ async def compile_agent_app():
     workflow.add_edge("tools", "chatbot")
     return workflow.compile(), all_tools
 
-# --- 4. 核心魔术：教 Agent 怎么“给自己上闹钟”的工具 ---
+@tool
+def get_current_datetime() -> str:
+    """現在の日時を取得する。ファイルに更新時刻を記録する際は必ずこのツールを使うこと。"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# --- 4. 核心魔术：给自己上闹钟的工具 (已修复线程问题) ---
 @tool
 def register_background_alarm_task(delay_seconds: int, autonomous_task_prompt: str) -> str:
     """当用户要求在未来的某个时间点、或者多少秒/分钟之后去执行某项自动化任务时，调用此工具。
     参数:
     - delay_seconds: 距离现在多少秒之后触发
-    - autonomous_task_prompt: 具体的任务指令描述，必须写得非常详细，因为触发时你将独自在后台执行。
+    - autonomous_task_prompt: 具体的任务指令描述，必须写得非常详细。
     """
     run_time = datetime.now() + timedelta(seconds=delay_seconds)
     
-    # 向全局调度器塞入一个异步的后台反向触发任务
-    st.session_state.scheduler.add_job(
+    # 🌟 核心修复：直接使用全局变量 GLOBAL_SCHEDULER，绕开 st.session_state 陷阱！
+    GLOBAL_SCHEDULER.add_job(
         func=execute_agent_in_background,
         trigger='date',
         run_date=run_time,
         args=[autonomous_task_prompt]
     )
-    return f"🔔 [系统通知]：闹钟设置成功！该任务已移交后台守护线程，将在 {delay_seconds} 秒后（时间：{run_time.strftime('%H:%M:%S')}）自动觉醒执行。"
+    return f"🔔 [系统通知]：闹钟设置成功！该任务已安全移交全局守护线程，将在 {delay_seconds} 秒后（约 {run_time.strftime('%H:%M:%S')}）自动觉醒执行。您可以继续向我提问其他问题。"
 
 # --- 5. 纯后台线程：当闹钟响起时，Agent 独立觉醒的执行体 ---
 def execute_agent_in_background(task_prompt: str):
-    """这个函数在操作系统的后台孤立线程中运行，没有网页 UI，它会把结果默默写进文件"""
-    print(f"\n⏰ [守护线程激活] 触发自主任务: {task_prompt}")
+    """此函数完全独立在操作系统的后台线程运行，没有网页 UI"""
+    print(f"\n⏰ [💥 闹钟响起！守护线程激活] 触发自主任务: {task_prompt}")
     
     async def backend_runner():
-        # 1. 重新拉起集群并编译图
         agent_app, _ = await compile_agent_app()
-        # 2. 赋予系统级提示，告诉它它是全权特工，结果必须落地成文件
         system_trigger = f"[系统定时通知] 闹钟时间到！请立刻开始独立执行以下任务，请记得使用你的工具将结果最终写成本地文件存下来：\n{task_prompt}"
         
-        print("🤖 后台 Agent 开始思考并连续调用工具...")
-        # 3. 默默在后台跑完整个图逻辑
+        print("🤖 后台 Agent 开始独立思考并调度 MCP 集群（联网+文件系统+数据库）...")
         await agent_app.ainvoke({"messages": [HumanMessage(content=system_trigger)]})
-        print("✅ 后台自主任务执行完毕，成果已落地。")
+        print("✅ 后台自主任务执行完毕，物理世界成果已落地。")
         
-    # 完美桥接：在同步的后台线程里拉起异步事件循环
     asyncio.run(backend_runner())
 
 # --- 6. 网页端：正常的同步用户流式交互 ---
